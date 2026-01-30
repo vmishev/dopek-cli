@@ -1,0 +1,604 @@
+// main.cpp
+#include <QCoreApplication>
+#include <QCommandLineParser>
+#include <QTextStream>
+#include <QStringList>
+#include <QDate>
+
+#include "core/repos/counterparty_repo.h"
+#include "core/services/counterparty_service.h"
+
+// (добавяш други includes, когато имплементираш другите targets)
+#include "core/repos/invoice_repo.h"
+#include "core/repos/invoice_line_repo.h"
+#include "core/services/invoice_service.h"
+#include "core/repos/invoice_line_repo.h"
+#include "core/services/invoice_line_service.h"
+
+static QTextStream out(stdout);
+static QTextStream err(stderr);
+
+static int fail(const QString& msg) {
+    err << "ERROR: " << msg << "\n";
+    return 1;
+}
+
+static void print_kv(const QString& key, const QString& value) {
+    out << key << "=" << value << "\n";
+}
+
+static QString formatOrDefault(const QCommandLineParser& p) {
+    const QString f = p.value("format").trimmed();
+    return f.isEmpty() ? "human" : f;
+}
+
+static void addCommonOptions(QCommandLineParser& p) {
+    p.addHelpOption();
+    p.addVersionOption();
+    p.addOption(QCommandLineOption(QStringList() << "f" << "format",
+                                   "Output format: human|kv (default human).",
+                                   "format",
+                                   "human"));
+}
+
+static bool isHuman(const QString& fmt) { return fmt == "human"; }
+static bool isKv(const QString& fmt) { return fmt == "kv"; }
+
+struct CommandHead {
+    QString action;  // create|edit|get|list|delete
+    QString target;  // counterparty|invoice|...
+    QStringList tailArgs; // options after action+target
+};
+
+static bool parseHead(const QStringList& argv, CommandHead& h) {
+    // argv[0] is program name
+    if (argv.size() < 3) return false;
+    h.action = argv[1].trimmed();
+    h.target = argv[2].trimmed();
+    h.tailArgs = argv.mid(3);
+    return true;
+}
+
+static int showTopHelp(const QString& prog) {
+    out << "Usage:\n"
+        << "  " << prog << " <action> <target> [--format human|kv] [options]\n\n"
+        << "Actions:\n"
+        << "  create | edit | get | list | delete\n\n"
+        << "Targets (planned):\n"
+        << "  counterparty | invoice | invoice-line | posting | project | material | inventory\n\n"
+        << "Examples:\n"
+        << "  " << prog << " create counterparty --name \"ACME\" --eik 123456789 --vat 1 --mol \"Ivan\" --address \"Sofia\" --email \"a@b.com\"\n"
+        << "  " << prog << " --format kv list counterparty\n";
+    return 1;
+}
+
+static std::optional<QDate> parseDateYmd(const QString& s) {
+    const auto d = QDate::fromString(s.trimmed(), "yyyy-MM-dd");
+    if (!d.isValid()) return std::nullopt;
+    return d;
+}
+
+static void printInvoiceHuman(const Invoice& inv) {
+    out << "Invoice #" << inv.id << "\n"
+        << "  number:   " << inv.number << "\n"
+        << "  cp_id:    " << inv.counterparty_id << "\n"
+        << "  date:     " << inv.date.toString("yyyy-MM-dd") << "\n"
+        << "  dir:      " << inv.direction << "\n"
+        << "  net:      " << inv.net_amount << "\n";
+}
+
+static void printInvoiceKv(const Invoice& inv) {
+    out << "id=" << inv.id
+        << " number=\"" << inv.number << "\""
+        << " cp_id=" << inv.counterparty_id
+        << " date=" << inv.date.toString("yyyy-MM-dd")
+        << " dir=" << inv.direction
+        << " net_amount=" << inv.net_amount
+        << "\n";
+}
+
+static void printInvoiceLineHuman(const InvoiceLine& l) {
+    double line_total = l.qty * l.unit_price;
+    out << "InvoiceLine #" << l.id << "\n"
+        << "  invoice_id: " << l.invoice_id << "\n"
+        << "  desc:       " << l.description << "\n"
+        << "  qty:        " << l.qty << "\n"
+        << "  unit_price: " << l.unit_price << "\n"
+        << "  total:      " << line_total << "\n";
+}
+
+static void printInvoiceLineKv(const InvoiceLine& l) {
+    double line_total = l.qty * l.unit_price;
+    out << "id=" << l.id
+        << " invoice_id=" << l.invoice_id
+        << " desc=\"" << l.description << "\""
+        << " qty=" << l.qty
+        << " price=" << l.unit_price
+        << " total=" << line_total
+        << "\n";
+}
+
+
+// -------------------------
+// Counterparty handlers
+// -------------------------
+
+static void printCounterpartyHuman(const Counterparty& c) {
+    out << "Counterparty #" << c.id << "\n"
+        << "  name:    " << c.name << "\n"
+        << "  eik:     " << c.eik << "\n"
+        << "  vat_reg: " << (c.vat_reg ? "true" : "false") << "\n"
+        << "  mol:     " << c.mol << "\n"
+        << "  address: " << c.address << "\n"
+        << "  email:   " << c.email << "\n";
+}
+
+static void printCounterpartyKv(const Counterparty& c) {
+    out << "id=" << c.id
+        << " name=\"" << c.name << "\""
+        << " eik=" << c.eik
+        << " vat_reg=" << (c.vat_reg ? "1" : "0")
+        << " mol=\"" << c.mol << "\""
+        << " address=\"" << c.address << "\""
+        << " email=\"" << c.email << "\""
+        << "\n";
+}
+
+static int handleCounterpartyCreate(const QStringList& args, CounterpartyService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek create counterparty");
+    addCommonOptions(p);
+
+    QCommandLineOption nameOpt("name", "Name.", "name");
+    QCommandLineOption eikOpt("eik", "EIK (9 digits).", "eik");
+    QCommandLineOption vatOpt("vat", "VAT registered: 0|1.", "vat");
+    QCommandLineOption molOpt("mol", "MOL.", "mol");
+    QCommandLineOption addressOpt("address", "Address.", "address");
+    QCommandLineOption emailOpt("email", "Email.", "email");
+
+    p.addOption(nameOpt);
+    p.addOption(eikOpt);
+    p.addOption(vatOpt);
+    p.addOption(molOpt);
+    p.addOption(addressOpt);
+    p.addOption(emailOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+
+    const QString fmt = formatOrDefault(p);
+    const QString name = p.value(nameOpt);
+    const QString eik = p.value(eikOpt);
+    const QString mol = p.value(molOpt);
+    const QString address = p.value(addressOpt);
+    const QString email = p.value(emailOpt);
+
+    bool vat_reg = false;
+    if (p.isSet(vatOpt)) vat_reg = (p.value(vatOpt).trimmed() == "1");
+
+    auto r = svc.add(name, eik, vat_reg, mol, address, email);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) print_kv("id", QString::number(r.value));
+    else out << "Created counterparty id=" << r.value << "\n";
+
+    return 0;
+}
+
+static int handleCounterpartyGet(const QStringList& args, CounterpartyService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek get counterparty");
+    addCommonOptions(p);
+
+    QCommandLineOption idOpt("id", "Id.", "id");
+    p.addOption(idOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    if (!p.isSet(idOpt)) return fail("--id is required");
+
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
+
+    auto r = svc.get(id);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) printCounterpartyKv(r.value);
+    else printCounterpartyHuman(r.value);
+
+    return 0;
+}
+
+static int handleCounterpartyList(const QStringList& args, CounterpartyService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek list counterparty");
+    addCommonOptions(p);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    const QString fmt = formatOrDefault(p);
+
+    auto r = svc.list();
+    if (!r.ok) return fail(r.error);
+
+    const auto& list = r.value; // avoid detach warnings
+    for (const Counterparty& c : list) {
+        if (isKv(fmt)) {
+            printCounterpartyKv(c);
+        } else {
+            out << "#" << c.id << " | " << c.name
+                << " | eik=" << c.eik
+                << " | vat=" << (c.vat_reg ? "1" : "0")
+                << "\n";
+        }
+    }
+    return 0;
+}
+
+static int handleCounterpartyEdit(const QStringList& args, CounterpartyService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek edit counterparty");
+    addCommonOptions(p);
+
+    QCommandLineOption idOpt("id", "Id.", "id");
+    QCommandLineOption nameOpt("name", "Name.", "name");
+    QCommandLineOption eikOpt("eik", "EIK (9 digits).", "eik");
+    QCommandLineOption vatOpt("vat", "VAT registered: 0|1.", "vat");
+    QCommandLineOption molOpt("mol", "MOL.", "mol");
+    QCommandLineOption addressOpt("address", "Address.", "address");
+    QCommandLineOption emailOpt("email", "Email.", "email");
+
+    p.addOption(idOpt);
+    p.addOption(nameOpt);
+    p.addOption(eikOpt);
+    p.addOption(vatOpt);
+    p.addOption(molOpt);
+    p.addOption(addressOpt);
+    p.addOption(emailOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    if (!p.isSet(idOpt)) return fail("--id is required");
+
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
+
+    std::optional<QString> name, eik, mol, address, email;
+    std::optional<bool> vat_reg;
+
+    if (p.isSet(nameOpt)) name = p.value(nameOpt);
+    if (p.isSet(eikOpt)) eik = p.value(eikOpt);
+    if (p.isSet(molOpt)) mol = p.value(molOpt);
+    if (p.isSet(addressOpt)) address = p.value(addressOpt);
+    if (p.isSet(emailOpt)) email = p.value(emailOpt);
+    if (p.isSet(vatOpt)) vat_reg = (p.value(vatOpt).trimmed() == "1");
+
+    auto r = svc.edit(id, name, eik, vat_reg, mol, address, email);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) print_kv("ok", "1");
+    else out << "Edited counterparty id=" << id << "\n";
+
+    return 0;
+}
+
+static int dispatchCounterparty(const QString& action, const QStringList& cmdArgs, CounterpartyService& svc) {
+    // cmdArgs is like: { "dopek", ...options... }
+    if (action == "create") return handleCounterpartyCreate(cmdArgs, svc);
+    if (action == "get")    return handleCounterpartyGet(cmdArgs, svc);
+    if (action == "list")   return handleCounterpartyList(cmdArgs, svc);
+    if (action == "edit")   return handleCounterpartyEdit(cmdArgs, svc);
+    return fail("unsupported action for counterparty");
+}
+
+static int handleInvoiceCreate(const QStringList& args, InvoiceService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek create invoice");
+    addCommonOptions(p);
+
+    QCommandLineOption numberOpt("number", "Invoice number.", "number");
+    QCommandLineOption cpOpt("cp", "Counterparty id.", "cp");
+    QCommandLineOption dateOpt("date", "Date YYYY-MM-DD.", "date");
+    QCommandLineOption dirOpt("dir", "Direction: purchase|sale.", "dir");
+
+    p.addOption(numberOpt);
+    p.addOption(cpOpt);
+    p.addOption(dateOpt);
+    p.addOption(dirOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+
+    const QString fmt = formatOrDefault(p);
+
+    if (!p.isSet(numberOpt)) return fail("--number is required");
+    if (!p.isSet(cpOpt)) return fail("--cp is required");
+    if (!p.isSet(dateOpt)) return fail("--date is required");
+    if (!p.isSet(dirOpt)) return fail("--dir is required");
+
+    const QString number = p.value(numberOpt);
+    const qint64 cp_id = p.value(cpOpt).toLongLong();
+
+    auto d = parseDateYmd(p.value(dateOpt));
+    if (!d.has_value()) return fail("--date invalid (YYYY-MM-DD)");
+
+    const QString dir = p.value(dirOpt).trimmed();
+    if (dir != "purchase" && dir != "sale") return fail("--dir must be purchase|sale");
+
+    auto r = svc.add(number, cp_id, d.value(), dir);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) print_kv("id", QString::number(r.value));
+    else out << "Created invoice id=" << r.value << "\n";
+
+    return 0;
+}
+
+static int handleInvoiceGet(const QStringList& args, InvoiceService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek get invoice");
+    addCommonOptions(p);
+
+    QCommandLineOption idOpt("id", "Id.", "id");
+    p.addOption(idOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    if (!p.isSet(idOpt)) return fail("--id is required");
+
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
+
+    auto r = svc.get(id);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) printInvoiceKv(r.value);
+    else printInvoiceHuman(r.value);
+
+    return 0;
+}
+
+static int handleInvoiceList(const QStringList& args, InvoiceService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek list invoice");
+    addCommonOptions(p);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    const QString fmt = formatOrDefault(p);
+
+    auto r = svc.list();
+    if (!r.ok) return fail(r.error);
+
+    const auto& list = r.value; // avoid detach
+    for (const Invoice& inv : list) {
+        if (isKv(fmt)) {
+            printInvoiceKv(inv);
+        } else {
+            out << "#" << inv.id << " | " << inv.number
+                << " | cp=" << inv.counterparty_id
+                << " | " << inv.date.toString("yyyy-MM-dd")
+                << " | " << inv.direction
+                << " | net=" << inv.net_amount
+                << "\n";
+        }
+    }
+    return 0;
+}
+
+static int handleInvoiceEdit(const QStringList& args, InvoiceService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek edit invoice");
+    addCommonOptions(p);
+
+    QCommandLineOption idOpt("id", "Id.", "id");
+    QCommandLineOption numberOpt("number", "Invoice number.", "number");
+    QCommandLineOption cpOpt("cp", "Counterparty id.", "cp");
+    QCommandLineOption dateOpt("date", "Date YYYY-MM-DD.", "date");
+    QCommandLineOption dirOpt("dir", "Direction: purchase|sale.", "dir");
+
+    p.addOption(idOpt);
+    p.addOption(numberOpt);
+    p.addOption(cpOpt);
+    p.addOption(dateOpt);
+    p.addOption(dirOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    if (!p.isSet(idOpt)) return fail("--id is required");
+
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
+
+    std::optional<QString> number;
+    std::optional<qint64> cp_id;
+    std::optional<QDate> date;
+    std::optional<QString> dir;
+
+    if (p.isSet(numberOpt)) number = p.value(numberOpt);
+
+    if (p.isSet(cpOpt)) cp_id = p.value(cpOpt).toLongLong();
+
+    if (p.isSet(dateOpt)) {
+        auto d = parseDateYmd(p.value(dateOpt));
+        if (!d.has_value()) return fail("--date invalid (YYYY-MM-DD)");
+        date = d.value();
+    }
+
+    if (p.isSet(dirOpt)) {
+        const QString v = p.value(dirOpt).trimmed();
+        if (v != "purchase" && v != "sale") return fail("--dir must be purchase|sale");
+        dir = v;
+    }
+
+    auto r = svc.edit(id, number, cp_id, date, dir);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) print_kv("ok", "1");
+    else out << "Edited invoice id=" << id << "\n";
+
+    return 0;
+}
+
+static int dispatchInvoice(const QString& action, const QStringList& cmdArgs, InvoiceService& svc) {
+    if (action == "create") return handleInvoiceCreate(cmdArgs, svc);
+    if (action == "get")    return handleInvoiceGet(cmdArgs, svc);
+    if (action == "list")   return handleInvoiceList(cmdArgs, svc);
+    if (action == "edit")   return handleInvoiceEdit(cmdArgs, svc);
+    return fail("unsupported action for invoice");
+}
+
+static int handleInvoiceLineCreate(const QStringList& args, InvoiceLineService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek create invoice-line");
+    addCommonOptions(p);
+
+    QCommandLineOption invOpt("invoice", "Invoice id.", "invoice");
+    QCommandLineOption descOpt("desc", "Description.", "desc");
+    QCommandLineOption qtyOpt("qty", "Quantity.", "qty");
+    QCommandLineOption priceOpt("price", "Unit price.", "price");
+
+    p.addOption(invOpt);
+    p.addOption(descOpt);
+    p.addOption(qtyOpt);
+    p.addOption(priceOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+
+    const QString fmt = formatOrDefault(p);
+
+    if (!p.isSet(invOpt)) return fail("--invoice is required");
+    if (!p.isSet(descOpt)) return fail("--desc is required");
+    if (!p.isSet(qtyOpt)) return fail("--qty is required");
+    if (!p.isSet(priceOpt)) return fail("--price is required");
+
+    const qint64 invoice_id = p.value(invOpt).toLongLong();
+    const QString desc = p.value(descOpt);
+
+    bool ok1=false, ok2=false;
+    const double qty = p.value(qtyOpt).toDouble(&ok1);
+    const double price = p.value(priceOpt).toDouble(&ok2);
+    if (!ok1) return fail("--qty must be number");
+    if (!ok2) return fail("--price must be number");
+
+    auto r = svc.add(invoice_id, desc, qty, price);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) print_kv("id", QString::number(r.value));
+    else out << "Created invoice-line id=" << r.value << "\n";
+    return 0;
+}
+
+static int handleInvoiceLineList(const QStringList& args, InvoiceLineService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek list invoice-line");
+    addCommonOptions(p);
+
+    QCommandLineOption invOpt("invoice", "Invoice id.", "invoice");
+    p.addOption(invOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    if (!p.isSet(invOpt)) return fail("--invoice is required");
+
+    const QString fmt = formatOrDefault(p);
+    const qint64 invoice_id = p.value(invOpt).toLongLong();
+
+    auto r = svc.list_by_invoice(invoice_id);
+    if (!r.ok) return fail(r.error);
+
+    const auto& list = r.value;
+    for (const InvoiceLine& l : list) {
+        if (isKv(fmt)) printInvoiceLineKv(l);
+        else out << "#" << l.id << " | inv=" << l.invoice_id
+                << " | " << l.description
+                << " | qty=" << l.qty
+                << " | price=" << l.unit_price
+                << " | total=" << l.line_total
+                << "\n";
+    }
+    return 0;
+}
+
+static int handleInvoiceLineDelete(const QStringList& args, InvoiceLineService& svc) {
+    QCommandLineParser p;
+    p.setApplicationDescription("dopek delete invoice-line");
+    addCommonOptions(p);
+
+    QCommandLineOption idOpt("id", "Line id.", "id");
+    p.addOption(idOpt);
+
+    if (!p.parse(args)) return fail(p.errorText());
+    if (!p.isSet(idOpt)) return fail("--id is required");
+
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
+
+    auto r = svc.remove(id);
+    if (!r.ok) return fail(r.error);
+
+    if (isKv(fmt)) print_kv("ok", "1");
+    else out << "Deleted invoice-line id=" << id << "\n";
+    return 0;
+}
+
+static int dispatchInvoiceLine(const QString& action, const QStringList& cmdArgs, InvoiceLineService& svc) {
+    if (action == "create") return handleInvoiceLineCreate(cmdArgs, svc);
+    if (action == "list")   return handleInvoiceLineList(cmdArgs, svc);
+    if (action == "delete") return handleInvoiceLineDelete(cmdArgs, svc);
+    return fail("unsupported action for invoice-line");
+}
+
+
+// -------------------------
+// Stubs for other targets
+// (to keep main.cpp clean and ready)
+// -------------------------
+
+static int dispatchNotImplemented(const QString& target) {
+    return fail(QString("target not implemented yet: %1").arg(target));
+}
+
+int main(int argc, char *argv[]) {
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setApplicationName("dopek");
+    QCoreApplication::setApplicationVersion("0.1");
+
+    // Wiring (in-memory for now)
+    CounterpartyRepo counterpartyRepo;
+    CounterpartyService counterpartyService(counterpartyRepo);
+    InvoiceRepo invoiceRepo;
+    InvoiceLineRepo invoiceLineRepo;
+    InvoiceService invoiceService(invoiceRepo, counterpartyRepo, invoiceLineRepo);
+    InvoiceLineService invoiceLineService(invoiceLineRepo, invoiceRepo, invoiceService);
+    // Parse head: action + target
+    CommandHead h;
+    const QStringList argvList = QCoreApplication::arguments();
+    if (!parseHead(argvList, h)) {
+        return showTopHelp(QCoreApplication::applicationName());
+    }
+
+    // Build command-args for the specific command parser:
+    // QCommandLineParser expects argv-like list where [0] is program name.
+    // We let each command parser have its own options; no global spaghetti.
+    QStringList cmdArgs;
+    cmdArgs << argvList[0];        // program name
+    cmdArgs << h.tailArgs;         // remaining options only
+
+    // Dispatch by target
+    if (h.target == "counterparty" || h.target == "cp") {
+        return dispatchCounterparty(h.action, cmdArgs, counterpartyService);
+    }
+
+    if (h.target == "invoice" || h.target == "inv") {
+        return dispatchInvoice(h.action, cmdArgs, invoiceService);
+    }
+    if (h.target == "invoice-line" || h.target == "line") {
+        return dispatchInvoiceLine(h.action, cmdArgs, invoiceLineService);
+    }
+    if (h.target == "posting" || h.target == "post") {
+        return dispatchNotImplemented("posting");
+    }
+    if (h.target == "project" || h.target == "prj") {
+        return dispatchNotImplemented("project");
+    }
+    if (h.target == "material" || h.target == "mat") {
+        return dispatchNotImplemented("material");
+    }
+    if (h.target == "inventory" || h.target == "invn") {
+        return dispatchNotImplemented("inventory");
+    }
+
+    return fail("unknown target");
+}
