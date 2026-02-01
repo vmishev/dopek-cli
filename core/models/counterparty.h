@@ -9,6 +9,9 @@ struct Counterparty {
     QString eik;          // 9 digits as string
     bool vat_reg = false;
 
+    QString vat_id;
+    QString country;
+
     QString mol;          // materialno otgovorno lice (as you define it)
     QString address;
     QString email;
