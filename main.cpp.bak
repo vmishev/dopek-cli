@@ -4,36 +4,16 @@
 #include <QTextStream>
 #include <QStringList>
 #include <QDate>
-#include <optional>
 
-#include "core/accounting/repos/counterparty_repo.h"
-#include "core/accounting/services/counterparty_service.h"
+#include "core/repos/counterparty_repo.h"
+#include "core/services/counterparty_service.h"
 
 // (добавяш други includes, когато имплементираш другите targets)
-#include "core/accounting/repos/invoice_repo.h"
-#include "core/accounting/repos/invoice_line_repo.h"
-#include "core/accounting/services/invoice_service.h"
-#include "core/accounting/repos/invoice_line_repo.h"
-#include "core/accounting/services/invoice_line_service.h"
-
-// Example commands (one per action/target):
-// Counterparty:
-//   dopek create counterparty --name "ACME LTD" --eik 123456789 --vat 1 --mol "Ivan Petrov" --address "Sofia Center" --email "a@b.com"
-//   dopek edit counterparty --id 1 --name "ACME Updated" --vat 0
-//   dopek get counterparty --id 1
-//   dopek list counterparty
-//   dopek delete counterparty --id 1
-// Invoice:
-//   dopek create invoice --number INV-001 --cp 1 --date 2024-01-10 --dir sale
-//   dopek edit invoice --id 1 --number INV-002
-//   dopek get invoice --id 1
-//   dopek list invoice
-//   dopek delete invoice --id 1
-// Invoice line:
-//   dopek create invoice-line --invoice 1 --desc "Consulting hours" --qty 2 --price 150 --unit hour --type services --line-no 1
-//   dopek get invoice-line --id 1
-//   dopek list invoice-line --invoice 1
-//   dopek delete invoice-line --id 1
+#include "core/repos/invoice_repo.h"
+#include "core/repos/invoice_line_repo.h"
+#include "core/services/invoice_service.h"
+#include "core/repos/invoice_line_repo.h"
+#include "core/services/invoice_line_service.h"
 
 static QTextStream out(stdout);
 static QTextStream err(stderr);
@@ -64,38 +44,6 @@ static void addCommonOptions(QCommandLineParser& p) {
 static bool isHuman(const QString& fmt) { return fmt == "human"; }
 static bool isKv(const QString& fmt) { return fmt == "kv"; }
 
-static std::optional<QString> parseFormat(const QCommandLineParser& p) {
-    const QString fmt = formatOrDefault(p);
-    if (!isHuman(fmt) && !isKv(fmt)) return std::nullopt;
-    return fmt;
-}
-
-static QString quoteIfNeeded(const QString& value) {
-    if (value.contains(' ')) return QString("\"%1\"").arg(value);
-    return value;
-}
-
-static std::optional<qint64> parseInt64(const QString& value) {
-    bool ok = false;
-    const qint64 parsed = value.toLongLong(&ok);
-    if (!ok) return std::nullopt;
-    return parsed;
-}
-
-static std::optional<int> parseInt(const QString& value) {
-    bool ok = false;
-    const int parsed = value.toInt(&ok);
-    if (!ok) return std::nullopt;
-    return parsed;
-}
-
-static std::optional<double> parseDouble(const QString& value) {
-    bool ok = false;
-    const double parsed = value.toDouble(&ok);
-    if (!ok) return std::nullopt;
-    return parsed;
-}
-
 struct CommandHead {
     QString action;  // create|edit|get|list|delete
     QString target;  // counterparty|invoice|...
@@ -116,8 +64,8 @@ static int showTopHelp(const QString& prog) {
         << "  " << prog << " <action> <target> [--format human|kv] [options]\n\n"
         << "Actions:\n"
         << "  create | edit | get | list | delete\n\n"
-        << "Targets:\n"
-        << "  counterparty (cp) | invoice (inv) | invoice-line (line)\n\n"
+        << "Targets (planned):\n"
+        << "  counterparty | invoice | invoice-line | posting | project | material | inventory\n\n"
         << "Examples:\n"
         << "  " << prog << " create counterparty --name \"ACME\" --eik 123456789 --vat 1 --mol \"Ivan\" --address \"Sofia\" --email \"a@b.com\"\n"
         << "  " << prog << " --format kv list counterparty\n";
@@ -141,7 +89,7 @@ static void printInvoiceHuman(const Invoice& inv) {
 
 static void printInvoiceKv(const Invoice& inv) {
     out << "id=" << inv.id
-        << " number=" << quoteIfNeeded(inv.number)
+        << " number=\"" << inv.number << "\""
         << " cp_id=" << inv.counterparty_id
         << " date=" << inv.date.toString("yyyy-MM-dd")
         << " dir=" << inv.direction
@@ -150,27 +98,23 @@ static void printInvoiceKv(const Invoice& inv) {
 }
 
 static void printInvoiceLineHuman(const InvoiceLine& l) {
+    double line_total = l.qty * l.unit_price;
     out << "InvoiceLine #" << l.id << "\n"
         << "  invoice_id: " << l.invoice_id << "\n"
-        << "  line_no:    " << l.line_no << "\n"
         << "  desc:       " << l.description << "\n"
-        << "  type:       " << l.line_type << "\n"
         << "  qty:        " << l.qty << "\n"
-        << "  unit:       " << l.unit << "\n"
         << "  unit_price: " << l.unit_price << "\n"
-        << "  net:        " << l.net_amount << "\n";
+        << "  total:      " << line_total << "\n";
 }
 
 static void printInvoiceLineKv(const InvoiceLine& l) {
+    double line_total = l.qty * l.unit_price;
     out << "id=" << l.id
         << " invoice_id=" << l.invoice_id
-        << " line_no=" << l.line_no
-        << " desc=" << quoteIfNeeded(l.description)
-        << " type=" << l.line_type
+        << " desc=\"" << l.description << "\""
         << " qty=" << l.qty
-        << " unit=" << quoteIfNeeded(l.unit)
         << " price=" << l.unit_price
-        << " net_amount=" << l.net_amount
+        << " total=" << line_total
         << "\n";
 }
 
@@ -191,12 +135,12 @@ static void printCounterpartyHuman(const Counterparty& c) {
 
 static void printCounterpartyKv(const Counterparty& c) {
     out << "id=" << c.id
-        << " name=" << quoteIfNeeded(c.name)
+        << " name=\"" << c.name << "\""
         << " eik=" << c.eik
         << " vat_reg=" << (c.vat_reg ? "1" : "0")
-        << " mol=" << quoteIfNeeded(c.mol)
-        << " address=" << quoteIfNeeded(c.address)
-        << " email=" << quoteIfNeeded(c.email)
+        << " mol=\"" << c.mol << "\""
+        << " address=\"" << c.address << "\""
+        << " email=\"" << c.email << "\""
         << "\n";
 }
 
@@ -221,23 +165,15 @@ static int handleCounterpartyCreate(const QStringList& args, CounterpartyService
 
     if (!p.parse(args)) return fail(p.errorText());
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    if (!p.isSet(nameOpt)) return fail("--name is required");
-    if (!p.isSet(eikOpt)) return fail("--eik is required");
-    if (!p.isSet(vatOpt)) return fail("--vat is required");
-    if (!p.isSet(molOpt)) return fail("--mol is required");
-    if (!p.isSet(addressOpt)) return fail("--address is required");
+    const QString fmt = formatOrDefault(p);
     const QString name = p.value(nameOpt);
     const QString eik = p.value(eikOpt);
     const QString mol = p.value(molOpt);
     const QString address = p.value(addressOpt);
     const QString email = p.value(emailOpt);
 
-    const QString vatRaw = p.value(vatOpt).trimmed();
-    if (vatRaw != "0" && vatRaw != "1") return fail("--vat must be 0|1");
-    const bool vat_reg = (vatRaw == "1");
+    bool vat_reg = false;
+    if (p.isSet(vatOpt)) vat_reg = (p.value(vatOpt).trimmed() == "1");
 
     auto r = svc.add(name, eik, vat_reg, mol, address, email);
     if (!r.ok) return fail(r.error);
@@ -259,12 +195,8 @@ static int handleCounterpartyGet(const QStringList& args, CounterpartyService& s
     if (!p.parse(args)) return fail(p.errorText());
     if (!p.isSet(idOpt)) return fail("--id is required");
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
 
     auto r = svc.get(id);
     if (!r.ok) return fail(r.error);
@@ -281,9 +213,7 @@ static int handleCounterpartyList(const QStringList& args, CounterpartyService& 
     addCommonOptions(p);
 
     if (!p.parse(args)) return fail(p.errorText());
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
+    const QString fmt = formatOrDefault(p);
 
     auto r = svc.list();
     if (!r.ok) return fail(r.error);
@@ -293,8 +223,10 @@ static int handleCounterpartyList(const QStringList& args, CounterpartyService& 
         if (isKv(fmt)) {
             printCounterpartyKv(c);
         } else {
-            printCounterpartyHuman(c);
-            out << "\n";
+            out << "#" << c.id << " | " << c.name
+                << " | eik=" << c.eik
+                << " | vat=" << (c.vat_reg ? "1" : "0")
+                << "\n";
         }
     }
     return 0;
@@ -324,12 +256,8 @@ static int handleCounterpartyEdit(const QStringList& args, CounterpartyService& 
     if (!p.parse(args)) return fail(p.errorText());
     if (!p.isSet(idOpt)) return fail("--id is required");
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
 
     std::optional<QString> name, eik, mol, address, email;
     std::optional<bool> vat_reg;
@@ -339,11 +267,7 @@ static int handleCounterpartyEdit(const QStringList& args, CounterpartyService& 
     if (p.isSet(molOpt)) mol = p.value(molOpt);
     if (p.isSet(addressOpt)) address = p.value(addressOpt);
     if (p.isSet(emailOpt)) email = p.value(emailOpt);
-    if (p.isSet(vatOpt)) {
-        const QString vatRaw = p.value(vatOpt).trimmed();
-        if (vatRaw != "0" && vatRaw != "1") return fail("--vat must be 0|1");
-        vat_reg = (vatRaw == "1");
-    }
+    if (p.isSet(vatOpt)) vat_reg = (p.value(vatOpt).trimmed() == "1");
 
     auto r = svc.edit(id, name, eik, vat_reg, mol, address, email);
     if (!r.ok) return fail(r.error);
@@ -354,40 +278,12 @@ static int handleCounterpartyEdit(const QStringList& args, CounterpartyService& 
     return 0;
 }
 
-static int handleCounterpartyDelete(const QStringList& args, CounterpartyRepo& repo) {
-    QCommandLineParser p;
-    p.setApplicationDescription("dopek delete counterparty");
-    addCommonOptions(p);
-
-    QCommandLineOption idOpt("id", "Id.", "id");
-    p.addOption(idOpt);
-
-    if (!p.parse(args)) return fail(p.errorText());
-    if (!p.isSet(idOpt)) return fail("--id is required");
-
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
-
-    if (!repo.remove(id)) return fail("counterparty not found");
-
-    if (isKv(fmt)) print_kv("ok", "1");
-    else out << "Deleted counterparty id=" << id << "\n";
-
-    return 0;
-}
-
-static int dispatchCounterparty(const QString& action, const QStringList& cmdArgs,
-                                CounterpartyService& svc, CounterpartyRepo& repo) {
+static int dispatchCounterparty(const QString& action, const QStringList& cmdArgs, CounterpartyService& svc) {
     // cmdArgs is like: { "dopek", ...options... }
     if (action == "create") return handleCounterpartyCreate(cmdArgs, svc);
     if (action == "get")    return handleCounterpartyGet(cmdArgs, svc);
     if (action == "list")   return handleCounterpartyList(cmdArgs, svc);
     if (action == "edit")   return handleCounterpartyEdit(cmdArgs, svc);
-    if (action == "delete") return handleCounterpartyDelete(cmdArgs, repo);
     return fail("unsupported action for counterparty");
 }
 
@@ -408,9 +304,7 @@ static int handleInvoiceCreate(const QStringList& args, InvoiceService& svc) {
 
     if (!p.parse(args)) return fail(p.errorText());
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
+    const QString fmt = formatOrDefault(p);
 
     if (!p.isSet(numberOpt)) return fail("--number is required");
     if (!p.isSet(cpOpt)) return fail("--cp is required");
@@ -418,9 +312,7 @@ static int handleInvoiceCreate(const QStringList& args, InvoiceService& svc) {
     if (!p.isSet(dirOpt)) return fail("--dir is required");
 
     const QString number = p.value(numberOpt);
-    const auto cpParsed = parseInt64(p.value(cpOpt));
-    if (!cpParsed.has_value()) return fail("--cp must be integer");
-    const qint64 cp_id = cpParsed.value();
+    const qint64 cp_id = p.value(cpOpt).toLongLong();
 
     auto d = parseDateYmd(p.value(dateOpt));
     if (!d.has_value()) return fail("--date invalid (YYYY-MM-DD)");
@@ -448,12 +340,8 @@ static int handleInvoiceGet(const QStringList& args, InvoiceService& svc) {
     if (!p.parse(args)) return fail(p.errorText());
     if (!p.isSet(idOpt)) return fail("--id is required");
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
 
     auto r = svc.get(id);
     if (!r.ok) return fail(r.error);
@@ -470,9 +358,7 @@ static int handleInvoiceList(const QStringList& args, InvoiceService& svc) {
     addCommonOptions(p);
 
     if (!p.parse(args)) return fail(p.errorText());
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
+    const QString fmt = formatOrDefault(p);
 
     auto r = svc.list();
     if (!r.ok) return fail(r.error);
@@ -482,8 +368,12 @@ static int handleInvoiceList(const QStringList& args, InvoiceService& svc) {
         if (isKv(fmt)) {
             printInvoiceKv(inv);
         } else {
-            printInvoiceHuman(inv);
-            out << "\n";
+            out << "#" << inv.id << " | " << inv.number
+                << " | cp=" << inv.counterparty_id
+                << " | " << inv.date.toString("yyyy-MM-dd")
+                << " | " << inv.direction
+                << " | net=" << inv.net_amount
+                << "\n";
         }
     }
     return 0;
@@ -509,12 +399,8 @@ static int handleInvoiceEdit(const QStringList& args, InvoiceService& svc) {
     if (!p.parse(args)) return fail(p.errorText());
     if (!p.isSet(idOpt)) return fail("--id is required");
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
 
     std::optional<QString> number;
     std::optional<qint64> cp_id;
@@ -523,11 +409,7 @@ static int handleInvoiceEdit(const QStringList& args, InvoiceService& svc) {
 
     if (p.isSet(numberOpt)) number = p.value(numberOpt);
 
-    if (p.isSet(cpOpt)) {
-        const auto parsed = parseInt64(p.value(cpOpt));
-        if (!parsed.has_value()) return fail("--cp must be integer");
-        cp_id = parsed.value();
-    }
+    if (p.isSet(cpOpt)) cp_id = p.value(cpOpt).toLongLong();
 
     if (p.isSet(dateOpt)) {
         auto d = parseDateYmd(p.value(dateOpt));
@@ -550,39 +432,11 @@ static int handleInvoiceEdit(const QStringList& args, InvoiceService& svc) {
     return 0;
 }
 
-static int handleInvoiceDelete(const QStringList& args, InvoiceRepo& repo) {
-    QCommandLineParser p;
-    p.setApplicationDescription("dopek delete invoice");
-    addCommonOptions(p);
-
-    QCommandLineOption idOpt("id", "Id.", "id");
-    p.addOption(idOpt);
-
-    if (!p.parse(args)) return fail(p.errorText());
-    if (!p.isSet(idOpt)) return fail("--id is required");
-
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
-
-    if (!repo.remove(id)) return fail("invoice not found");
-
-    if (isKv(fmt)) print_kv("ok", "1");
-    else out << "Deleted invoice id=" << id << "\n";
-
-    return 0;
-}
-
-static int dispatchInvoice(const QString& action, const QStringList& cmdArgs,
-                           InvoiceService& svc, InvoiceRepo& repo) {
+static int dispatchInvoice(const QString& action, const QStringList& cmdArgs, InvoiceService& svc) {
     if (action == "create") return handleInvoiceCreate(cmdArgs, svc);
     if (action == "get")    return handleInvoiceGet(cmdArgs, svc);
     if (action == "list")   return handleInvoiceList(cmdArgs, svc);
     if (action == "edit")   return handleInvoiceEdit(cmdArgs, svc);
-    if (action == "delete") return handleInvoiceDelete(cmdArgs, repo);
     return fail("unsupported action for invoice");
 }
 
@@ -595,56 +449,31 @@ static int handleInvoiceLineCreate(const QStringList& args, InvoiceLineService& 
     QCommandLineOption descOpt("desc", "Description.", "desc");
     QCommandLineOption qtyOpt("qty", "Quantity.", "qty");
     QCommandLineOption priceOpt("price", "Unit price.", "price");
-    QCommandLineOption unitOpt("unit", "Unit (optional).", "unit");
-    QCommandLineOption typeOpt("type", "Line type: goods|services (optional).", "type");
-    QCommandLineOption lineNoOpt("line-no", "Line number (optional).", "line-no");
 
     p.addOption(invOpt);
     p.addOption(descOpt);
     p.addOption(qtyOpt);
     p.addOption(priceOpt);
-    p.addOption(unitOpt);
-    p.addOption(typeOpt);
-    p.addOption(lineNoOpt);
 
     if (!p.parse(args)) return fail(p.errorText());
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
+    const QString fmt = formatOrDefault(p);
 
     if (!p.isSet(invOpt)) return fail("--invoice is required");
     if (!p.isSet(descOpt)) return fail("--desc is required");
     if (!p.isSet(qtyOpt)) return fail("--qty is required");
     if (!p.isSet(priceOpt)) return fail("--price is required");
 
-    const auto invoiceParsed = parseInt64(p.value(invOpt));
-    if (!invoiceParsed.has_value()) return fail("--invoice must be integer");
-    const qint64 invoice_id = invoiceParsed.value();
+    const qint64 invoice_id = p.value(invOpt).toLongLong();
     const QString desc = p.value(descOpt);
 
-    const auto qtyParsed = parseDouble(p.value(qtyOpt));
-    const auto priceParsed = parseDouble(p.value(priceOpt));
-    if (!qtyParsed.has_value()) return fail("--qty must be number");
-    if (!priceParsed.has_value()) return fail("--price must be number");
-    const double qty = qtyParsed.value();
-    const double price = priceParsed.value();
+    bool ok1=false, ok2=false;
+    const double qty = p.value(qtyOpt).toDouble(&ok1);
+    const double price = p.value(priceOpt).toDouble(&ok2);
+    if (!ok1) return fail("--qty must be number");
+    if (!ok2) return fail("--price must be number");
 
-    int line_no = 1;
-    if (p.isSet(lineNoOpt)) {
-        const auto lineNoParsed = parseInt(p.value(lineNoOpt));
-        if (!lineNoParsed.has_value()) return fail("--line-no must be integer");
-        line_no = lineNoParsed.value();
-    }
-    if (line_no <= 0) return fail("--line-no must be positive integer");
-
-    const QString line_type = p.isSet(typeOpt) ? p.value(typeOpt).trimmed() : "goods";
-    if (line_type != "goods" && line_type != "services") return fail("--type must be goods|services");
-
-    const QString unit = p.isSet(unitOpt) ? p.value(unitOpt).trimmed() : "pcs";
-    if (unit.isEmpty()) return fail("--unit must be non-empty");
-
-    auto r = svc.add(invoice_id, line_no, desc, line_type, qty, unit, price);
+    auto r = svc.add(invoice_id, desc, qty, price);
     if (!r.ok) return fail(r.error);
 
     if (isKv(fmt)) print_kv("id", QString::number(r.value));
@@ -663,51 +492,22 @@ static int handleInvoiceLineList(const QStringList& args, InvoiceLineService& sv
     if (!p.parse(args)) return fail(p.errorText());
     if (!p.isSet(invOpt)) return fail("--invoice is required");
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto invoiceParsed = parseInt64(p.value(invOpt));
-    if (!invoiceParsed.has_value()) return fail("--invoice must be integer");
-    const qint64 invoice_id = invoiceParsed.value();
+    const QString fmt = formatOrDefault(p);
+    const qint64 invoice_id = p.value(invOpt).toLongLong();
 
-    auto r = svc.list(invoice_id);
+    auto r = svc.list_by_invoice(invoice_id);
     if (!r.ok) return fail(r.error);
 
     const auto& list = r.value;
     for (const InvoiceLine& l : list) {
-        if (isKv(fmt)) {
-            printInvoiceLineKv(l);
-        } else {
-            printInvoiceLineHuman(l);
-            out << "\n";
-        }
+        if (isKv(fmt)) printInvoiceLineKv(l);
+        else out << "#" << l.id << " | inv=" << l.invoice_id
+                << " | " << l.description
+                << " | qty=" << l.qty
+                << " | price=" << l.unit_price
+                << " | total=" << l.line_total
+                << "\n";
     }
-    return 0;
-}
-
-static int handleInvoiceLineGet(const QStringList& args, InvoiceLineRepo& repo) {
-    QCommandLineParser p;
-    p.setApplicationDescription("dopek get invoice-line");
-    addCommonOptions(p);
-
-    QCommandLineOption idOpt("id", "Line id.", "id");
-    p.addOption(idOpt);
-
-    if (!p.parse(args)) return fail(p.errorText());
-    if (!p.isSet(idOpt)) return fail("--id is required");
-
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
-
-    const auto line = repo.get(id);
-    if (!line.has_value()) return fail("invoice_line not found");
-
-    if (isKv(fmt)) printInvoiceLineKv(line.value());
-    else printInvoiceLineHuman(line.value());
     return 0;
 }
 
@@ -722,12 +522,8 @@ static int handleInvoiceLineDelete(const QStringList& args, InvoiceLineService& 
     if (!p.parse(args)) return fail(p.errorText());
     if (!p.isSet(idOpt)) return fail("--id is required");
 
-    const auto fmtOpt = parseFormat(p);
-    if (!fmtOpt.has_value()) return fail("--format must be human|kv");
-    const QString fmt = fmtOpt.value();
-    const auto idParsed = parseInt64(p.value(idOpt));
-    if (!idParsed.has_value()) return fail("--id must be integer");
-    const qint64 id = idParsed.value();
+    const QString fmt = formatOrDefault(p);
+    const qint64 id = p.value(idOpt).toLongLong();
 
     auto r = svc.remove(id);
     if (!r.ok) return fail(r.error);
@@ -737,10 +533,8 @@ static int handleInvoiceLineDelete(const QStringList& args, InvoiceLineService& 
     return 0;
 }
 
-static int dispatchInvoiceLine(const QString& action, const QStringList& cmdArgs,
-                               InvoiceLineService& svc, InvoiceLineRepo& repo) {
+static int dispatchInvoiceLine(const QString& action, const QStringList& cmdArgs, InvoiceLineService& svc) {
     if (action == "create") return handleInvoiceLineCreate(cmdArgs, svc);
-    if (action == "get")    return handleInvoiceLineGet(cmdArgs, repo);
     if (action == "list")   return handleInvoiceLineList(cmdArgs, svc);
     if (action == "delete") return handleInvoiceLineDelete(cmdArgs, svc);
     return fail("unsupported action for invoice-line");
@@ -784,14 +578,14 @@ int main(int argc, char *argv[]) {
 
     // Dispatch by target
     if (h.target == "counterparty" || h.target == "cp") {
-        return dispatchCounterparty(h.action, cmdArgs, counterpartyService, counterpartyRepo);
+        return dispatchCounterparty(h.action, cmdArgs, counterpartyService);
     }
 
     if (h.target == "invoice" || h.target == "inv") {
-        return dispatchInvoice(h.action, cmdArgs, invoiceService, invoiceRepo);
+        return dispatchInvoice(h.action, cmdArgs, invoiceService);
     }
     if (h.target == "invoice-line" || h.target == "line") {
-        return dispatchInvoiceLine(h.action, cmdArgs, invoiceLineService, invoiceLineRepo);
+        return dispatchInvoiceLine(h.action, cmdArgs, invoiceLineService);
     }
     if (h.target == "posting" || h.target == "post") {
         return dispatchNotImplemented("posting");
