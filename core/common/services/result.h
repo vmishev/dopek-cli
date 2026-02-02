@@ -1,24 +1,21 @@
+// core/common/services/result.h
 #pragma once
 #include <QString>
 
 struct ResultVoid {
-    bool ok = true;
+    bool ok = false;
     QString error;
 
-    static ResultVoid success() { return {true, ""}; }
-    static ResultVoid fail(const QString& e) { return {false, e}; }
+    static ResultVoid success() { return ResultVoid{true, ""}; }
+    static ResultVoid failure(const QString& e) { return ResultVoid{false, e}; }
 };
 
 template <typename T>
 struct Result {
-    bool ok = true;
+    bool ok = false;
     T value{};
     QString error;
 
-    static Result<T> success(const T& v) {
-        Result<T> r; r.ok = true; r.value = v; return r;
-    }
-    static Result<T> fail(const QString& e) {
-        Result<T> r; r.ok = false; r.error = e; return r;
-    }
+    static Result<T> success(const T& v) { return Result<T>{true, v, ""}; }
+    static Result<T> failure(const QString& e) { return Result<T>{false, T{}, e}; }
 };

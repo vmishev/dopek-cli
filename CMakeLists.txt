@@ -16,6 +16,7 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
 # ---------- executable ----------
 add_executable(dopek
     main.cpp
+
 )
 
 # ---------- sources ----------

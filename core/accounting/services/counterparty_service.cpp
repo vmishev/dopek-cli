@@ -30,10 +30,10 @@ Result<qint64> CounterpartyService::add(const QString& name,
                                         const QString& mol,
                                         const QString& address,
                                         const QString& email) {
-    if (isBlank(name)) return Result<qint64>::fail("counterparty.name is required");
-    if (!isEik9(eik)) return Result<qint64>::fail("counterparty.eik must be exactly 9 digits");
-    if (!isEmailBasic(email)) return Result<qint64>::fail("counterparty.email invalid");
-    if (isBlank(address)) return Result<qint64>::fail("counterparty.address is required");
+    if (isBlank(name)) return Result<qint64>::failure("counterparty.name is required");
+    if (!isEik9(eik)) return Result<qint64>::failure("counterparty.eik must be exactly 9 digits");
+    if (!isEmailBasic(email)) return Result<qint64>::failure("counterparty.email invalid");
+    if (isBlank(address)) return Result<qint64>::failure("counterparty.address is required");
 
     Counterparty c;
     c.name = name.trimmed();
@@ -54,16 +54,16 @@ ResultVoid CounterpartyService::edit(qint64 id,
                                      const std::optional<QString>& address,
                                      const std::optional<QString>& email) {
     auto old = repo.get(id);
-    if (!old.has_value()) return ResultVoid::fail("counterparty not found");
+    if (!old.has_value()) return ResultVoid::failure("counterparty not found");
 
     Counterparty updated = old.value();
 
     if (name.has_value()) {
-        if (isBlank(name.value())) return ResultVoid::fail("counterparty.name cannot be blank");
+        if (isBlank(name.value())) return ResultVoid::failure("counterparty.name cannot be blank");
         updated.name = name.value().trimmed();
     }
     if (eik.has_value()) {
-        if (!isEik9(eik.value())) return ResultVoid::fail("counterparty.eik must be exactly 9 digits");
+        if (!isEik9(eik.value())) return ResultVoid::failure("counterparty.eik must be exactly 9 digits");
         updated.eik = eik.value().trimmed();
     }
     if (vat_reg.has_value()) {
@@ -73,21 +73,21 @@ ResultVoid CounterpartyService::edit(qint64 id,
         updated.mol = mol.value().trimmed();
     }
     if (address.has_value()) {
-        if (isBlank(address.value())) return ResultVoid::fail("counterparty.address cannot be blank");
+        if (isBlank(address.value())) return ResultVoid::failure("counterparty.address cannot be blank");
         updated.address = address.value().trimmed();
     }
     if (email.has_value()) {
-        if (!isEmailBasic(email.value())) return ResultVoid::fail("counterparty.email invalid");
+        if (!isEmailBasic(email.value())) return ResultVoid::failure("counterparty.email invalid");
         updated.email = email.value().trimmed();
     }
 
-    if (!repo.update(id, updated)) return ResultVoid::fail("counterparty update failed");
+    if (!repo.update(id, updated)) return ResultVoid::failure("counterparty update failed");
     return ResultVoid::success();
 }
 
 Result<Counterparty> CounterpartyService::get(qint64 id) const {
     auto c = repo.get(id);
-    if (!c.has_value()) return Result<Counterparty>::fail("counterparty not found");
+    if (!c.has_value()) return Result<Counterparty>::failure("counterparty not found");
     return Result<Counterparty>::success(c.value());
 }
 
